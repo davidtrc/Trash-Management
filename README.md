@@ -11,4 +11,17 @@ You can use the libraries that I attach to my project, but it can be obsoletes b
 recommend download them from the mbed Compiler.
 
 The RCSwitch library is made by Chris Dick and you can find it in https://developer.mbed.org/users/TheChrisyd/code/RCSwitch/
+
 The HX711 library is made by Cr-300-Litho and you can find it in https://developer.mbed.org/teams/Cr300-Litho/code/HX711/
+
+The main in TX folder reads the sensors. The trash made has:
+    
+    · One of pressure: to detect the weight of the residues
+    · One ultrasonic: placed in the roof of the trash can, measures the height of the residues
+    · One flame sensor: to detect fire.
+    · One of gasses: to measure levels of, por example, methane or carbon monoxid
+    
+After read them, send the data in five minutes intervals to the central node. If detects fire or anormal gasses levels it sends the alarm
+inmediately.
+
+The main in RX folder receives the data of the nodes and process them.
