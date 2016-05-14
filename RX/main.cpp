@@ -4,9 +4,12 @@
 #include "mbed.h"
 
 #define MEASURE_SIZE 26
-//I/O pins
+
+/******      I/O PINS      ********/
 DigitalOut led_tx(LED1);
 RCSwitch mySwitch = RCSwitch(D2, D3); //SERIAL2 TX & RX. (cuadrado y rectangular)
+/****** End of I/O PINS     *******/
+
 //Values to manage the received message and its ACK
 char received[MEASURE_SIZE]; //Received chain in binary format
 int received_value; //Received chain in int format
@@ -19,6 +22,7 @@ char priority_message[4];
 char sensor_id[4];
 char lecture[14];
 char* ack_message;
+char decoded_message[150];
 
 //------------------------------------
 // UART configuration
@@ -31,8 +35,21 @@ void send_received(void);
 void check_received();
 void decode_received_message(void);
 
+
+static time_t start, end; //with them, can count time waiting for ACK
+static int seconds_elapsed = 0;
+
+/**************************************************************************************
+*                                                                                     *
+*   Function: main()                                                                  *
+*   Executes the main program. Waits to receive a packet, and when comes, resend it   *
+*   to check if it is correct. If is, send ACK and decode the message, split it in    *
+*   node ID, priority of the message, sensor ID, and lecture                          *
+*   If nothing happends, at five minutes send the information of every sensor.        *
+*                                                                                     *
+**************************************************************************************/
 int main(){
-    strcpy(ack_message, "101010");
+    strcpy(ack_message, "101010"); //Hard code the ack string message
     pc.printf("Inicializacion completada. Recibiendo...\n");
     while(1){
         while(!mySwitch.available()){
@@ -43,79 +60,151 @@ int main(){
             send_received();
             mySwitch.resetAvailable();
         }
-        pc.printf("Waiting for ACK\n");
+        pc.printf("Esperando para el ACK\n");
+        time(&start);
         while(!mySwitch.available()){
-            //Añadir timeout para el ACK
+            time(&stop);
+            seconds_elapsed = difftime(start, stop);
+            if(seconds_elapsed >=2){
+                pc.printf("No se ha recibido el ACK, se considera la secuencia recibida válida y se pasa a su decodificación\n");
+                break;
+            }
         }
         if(mySwitch.available()){
             received_ack_int = mySwitch.getReceivedValue();
             check_received();
             mySwitch.resetAvailable();
         }
-        if(received_value == 0){
-        
-        } else {
+        if((received_value != 0) && (received_length >=7)){
             decode_received_message();
         }
-        pc.printf("Alcanzado el final del while1");
     }
 }
 
+/**************************************************************************************
+*                                                                                     *
+*   Function: send_received()                                                         *
+*   Prints the received binary chain and resends it. After, waits for and answer of   *
+*   the transmitter, saying if the chain was correctly received.                      *
+*                                                                                     *
+**************************************************************************************/
 void send_received(){
     itoa(received_value, received,2);
             
     if (received_value==0){
-        pc.printf("Unknown format");  
+        pc.printf("No reconocido");  
     } else {
-        pc.printf("I have received: %s of %d bits \r \n", received, received_length );
-        wait(1);
-        pc.printf("Sending received chain for ACK \n");
+        pc.printf("He recibido: %s de %d bits \n", received, received_length );
+        wait_ms(800);
+        pc.printf("Reenviando la secuencia recibida para comprobar si es correcta\n");
         led_tx = 1;
         mySwitch.send(received);
         led_tx = 0;
     }
 }
 
+/**************************************************************************************
+*                                                                                     *
+*   Function: check_received()                                                        *
+*   Check if the transmitter informs that chain is correct or not.                    *
+*                                                                                     *
+**************************************************************************************/
 void check_received(){
     itoa(received_ack_int, received_ack,2);
             
     if (received_ack_int==0){
-        pc.printf("Unknown format");  
-    } else if ( received_ack_int == 42 ){
-        pc.printf("Transmitter confirms that the message is correct. Sending final ACK and proccessing the message\n" );
-        wait(1);
-        pc.printf("Sending final ACK \n");
+        pc.printf("No reconocido"); 
+    } else if ( received_ack_int == 42 ){ // 42 == 101010, binary ACK
+        pc.printf("El transmisor confirma que el mensaje es correcto. Enviando ACK final y procesando el mensaje\n" );
+        wait_ms(800);
         led_tx = 1;
         mySwitch.send(received_ack);
         led_tx = 0;
     } else {
-        pc.printf("Transmitter informs that received message is not correct. Discarding and waiting for a new one\n");
+        pc.printf("El transmisor informa de que la secuencia no es correcta. Descartada y esperando a recibir de nuevo...\n");
         received_value = 0; 
-        received_length = 0;
+        //received_length = 0;
     }   
 }
 
+/**************************************************************************************
+*                                                                                     *
+*   Function: decode_received_message()                                               *
+*   Takes the received binary chain and decode it, splitting in node ID, priority of  *
+*   the message, sensor ID, and lecture in human comprehensible way                   *
+*                                                                                     *
+**************************************************************************************/
 void decode_received_message(){
-    node_id[0] = received[0];
-    priority_message[0] = received [1];
-    node_id[0] = received [2];
-    lecture[0] = received [3];
-    
-    for(int i=0; i<3; i++){
+    int i = 0;
+    for (i = 0; i<4; i++){
         node_id[i] = received[i];
     }
-    for(int j=4; j<8; j++){
-        priority_message[j-4] = received[j];
+    for (i = 4; i<8; i++){
+        priority_message[i-4] = received[i];
     }
-    for(int k=8; k<12; k++){
-        sensor_id[k-8] = received[k];
+    for (i = 8; i<12; i++){
+        sensor_id[i-8] = received[i];
     }
-    for(int l=12; l<MEASURE_SIZE; l++){
-        lecture[l-12] = received[l];
+    for (i = 12; i<received_length; i++){
+        lecture[i-12] = received[i];
     }
-    pc.printf("El nodo %s informa con prioridad %s que el sensor %s tiene una lectura de %s\n", node_id, priority_message, sensor_id, lecture);
+    strcpy(decoded_message, "El nodo ");
+    pc.printf("El nodo ");
+    for(int i=0; i<sizeof(node_id); i++){
+        pc.printf("%c", node_id[i]);
+    }
+    strcat(decoded_message, node_id);
+    strcat(decoded_message, " informa con prioridad ");
+    pc.printf(" informa con prioridad ");
+    if(priority_message[0] == '1' && priority_message[1] == '1' && priority_message[2] == '1' && priority_message[3] == '1' ){
+        pc.printf("ALTA ");
+        strcat(decoded_message, "ALTA ");
+    }
+    if(priority_message[0] == '1' && priority_message[1] == '0' && priority_message[2] == '1' && priority_message[3] == '0' ){
+        pc.printf("normal ");
+        strcat(decoded_message, "normal ");
+    }
+    strcat(decoded_message, " que el sensor ");
+    pc.printf(" que el sensor ");
+    if(sensor_id[0] == '1' && sensor_id[1] == '0' && sensor_id[2] == '0' && sensor_id[3] == '1' ){
+        pc.printf("de presion ");
+        strcat(decoded_message, "de presion ");
+    }
+    if(sensor_id[0] == '1' && sensor_id[1] == '0' && sensor_id[2] == '1' && sensor_id[3] == '1' ){
+        pc.printf("de ultrasonidos ");
+        strcat(decoded_message, "de ultrasonidos ");
+    }
+    if(sensor_id[0] == '1' && sensor_id[1] == '1' && sensor_id[2] == '0' && sensor_id[3] == '1' ){
+        pc.printf("de llama ");
+        strcat(decoded_message, "de llama ");
+    }
+    if(sensor_id[0] == '1' && sensor_id[1] == '1' && sensor_id[2] == '1' && sensor_id[3] == '1' ){
+        pc.printf("de gases ");
+        strcat(decoded_message, "de gases ");
+    }
+    pc.printf(" tiene una lectura de ");
+    strcat(decoded_message, "tiene una lectura de ");
+    for(int i=0; i<(received_length-12); i++){
+        pc.printf("%c", lecture[i]);
+        
+    }
+    strcat(decoded_message, lecture);
+    strcat(decoded_message, "\r \n");
+    pc.printf("\r \n");
+    pc.printf("%s", decoded_message);
 }
 
+/*************************************************************************************
+*                                                                                    *
+*   Function: itoa(int value, char* result, int base)                                *
+*   Takes a int value and writes in char* result, the transformation of that value   *
+*   in the base passed as parameter. I.e, base = 2 is binary. The return of the      *
+*   function is the same array passed as parameter, so is not needed to make a       *
+*   statement like char* array = itoa(...) if you dont want two equals arrays        *
+*   Obtained from:                                                                   *
+*   https://developer.mbed.org/teams/auPilot/code/auSpeed/file/d38b3edad9b3/itoa.cpp *
+*                                                                                    *
+**************************************************************************************/
 char* itoa(int value, char* result, int base){
     // check that the base if valid
     if ( base < 2 || base > 36 ) {

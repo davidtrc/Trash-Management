@@ -2,31 +2,30 @@
 //             TO DO                            //
 //                                              //
 //  Add encryption                              //
-//  Check the wait_for_ack function             //
-//  Optimize formatting functions and unify     //
-//  Make non necessary local variable volatile  //
 //  Correct the read_pressure function          //
-//  Implement a non blocking read_ultrasound    //
-//  Comment ultrasound, pressure, wait_for_ack  //
 //                                              //
 //////////////////////////////////////////////////
+//https://developer.mbed.org/users/NickRyder/code/Pulse/
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <RCSwitch.h>
 #include <HX711.h>
+#include <Pulse.h>
 #include "mbed.h"
 
 #define RESOLUTION 10000 //10000 = 14 bits. This will multiply the read measure (between 0-1)
 #define MEASURE_SIZE 17
+#define TIME_SEND_S 30 //Defines time elapsed, in seconds, between data sending
 
 /******      I/O PINS      ********/
 DigitalOut led_tx(LED1); //LED in nucleo
 RCSwitch mySwitch = RCSwitch(D2, D3); //SERIAL2 TX & RX. Its on the bottom of the Nucleo. Initialices a RCSwitch object, in charge of manage the 434 MHz modems
 DigitalIn fire_sensor(A0); //Pin to connect fire sensor
-DigitalInOut ultrasound_sensor1(D4); //Pin to connecto Ultrasound sensor. It's inout cause it sends a signal and waits to receive the echo
-AnalogIn pressure_sensor1(A0);
+//DigitalInOut ultrasound_sensor1(D4); //Pin to connecto Ultrasound sensor. It's inout cause it sends a signal and waits to receive the echo
+PulseInOut ultrasound_sensor = PulseInOut(D4); //Init a PulseInOut object, necessary to read ultrasonic sensor, cause mbed dont have PulseIn, used with this sensor in Arduino
+HX711 pressureAmplifier = HX711(D5, D6); //(CLK signal, Data signal). Initialices a HX711 object, a circuit necesarry to amplify the pressure sensor signal
 //Rest of sensor would be in the others analog or digital pins
 /****** End of I/O PINS     *******/
 
@@ -63,21 +62,18 @@ char formated_chain4[32];
 
 char received[26]; //Stores in binary string format the message received
 
-static time_t start, end; //with them, can count time passed between data send
+static time_t start, end; //with them, can count time passed between data sendings
 static double seconds_elapsed = 0; //Stores the time passed between above timers
 
-int count = 0;
 char* actual_message; //Stores the last message send. Useful for wait_for_ACK function
-
+int times_resend = 0; //Times that resend is called. When 6, the programs desists in receive an answer and go on 
 //--------------------------------------//
 // UART configuration                   //
 // 9600 bauds, 8-bit data, no parity    //
 //--------------------------------------//
-Serial pc(SERIAL_TX, SERIAL_RX); //PRE-DEFINED PINS, CAN BE USED WITHOUT ANY PROBLEM CAUSE DON'T USE AVAILABLE NUCLEO I/O
- 
+Serial pc(SERIAL_TX, SERIAL_RX); //PRE-DEFINED PINS, CAN BE USED WITHOUT ANY PROBLEM CAUSE DON'T USE AVAILABLE NUCLEO I/O 
 void read_pressure (void);
 void read_ultrasound (void);
-long microsecondsToCentimeters(long microseconds);
 void read_fire (void);
 void read_gas (void);
 char* formatting_pressure_message (int type_message, char* sensor_id);
@@ -105,6 +101,7 @@ int main(){
         led_tx = 0;
         read_fire();
         read_gas();
+        read_ultrasound();
         if(fire_type == 1){
             wait(2); //Wait for check that the alert is not casual. If the alert persists, notify inmediately the central node
             read_fire();
@@ -115,6 +112,7 @@ int main(){
                 led_tx = 0;
                 actual_message = fire_final_chain; //Make actual_message equals to the message to send, for resend function
                 wait_for_ack();
+                printf("Nada mas por enviar \r \n");
             }
         }
         if(gas_type == 1){
@@ -127,11 +125,12 @@ int main(){
                 led_tx = 0;
                 actual_message = gas_final_chain;
                 wait_for_ack();
+                printf("Nada mas por enviar \r \n");
             }
         }
         time(&end); //Get actual time in another timer
         seconds_elapsed = difftime (end,start); //Calculates the difference between timers, equals to seconds elapsed
-        if(seconds_elapsed >= 300){
+        if(seconds_elapsed >= TIME_SEND_S){
             read_pressure();
             led_tx = 1;
             printf("Transmitiendo peso\n");
@@ -139,7 +138,7 @@ int main(){
             led_tx = 0;
             actual_message = pressure_final_chain;
             wait_for_ack();
-            wait(2); //Wait to start another data sending to avoid collisions. Maybe 2 seconds it's too conservative
+            wait_ms(800); //Wait to start another data sending to avoid collisions and/or the receiver is not ready
             read_ultrasound();
             led_tx = 1;
             printf("Transmitiendo altura de la basura\n");
@@ -147,22 +146,22 @@ int main(){
             led_tx = 0;
             actual_message = ultrasound1_final_chain;
             wait_for_ack();
-            wait(2);
+            wait_ms(800); //Wait to start another data sending to avoid collisions and/or the receiver is not ready
             led_tx = 1;
             printf("Transmitiendo sensor de llama\n");
             mySwitch.send(fire_final_chain);
-            wait(2);
             led_tx = 0;
             actual_message = fire_final_chain;
             wait_for_ack();
-            wait(2);
+            wait_ms(800); //Wait to start another data sending to avoid collisions and/or the receiver is not ready
             led_tx = 1;
             printf("Transmitiendo niveles de gases\n");
             mySwitch.send(gas_final_chain);
             led_tx = 0;
             actual_message = gas_final_chain;
             wait_for_ack();
-            wait(2);
+            wait_ms(800); //Wait to start another data sending to avoid collisions and/or the receiver is not ready
+            printf("Nada mas por enviar\r \n");
             time(&start); //reset the timer
         }
     }
@@ -179,6 +178,7 @@ int main(){
 void resend(void){
     led_tx = 1;
     mySwitch.send(actual_message);
+    led_tx = 0;
     wait_for_ack();
 }
 
@@ -191,41 +191,60 @@ void resend(void){
 *                                                                                    *
 **************************************************************************************/
 void wait_for_ack(void){
-    while (count <=5){
+    time_t start_ack, stop_ack; //With them count the time that program are waiting for ACK
+    time(&start_ack);
+    int dif_time=0; //Time passed between time_t's
+    while (dif_time<=5){
         if(mySwitch.available()){
             int value = mySwitch.getReceivedValue();
             itoa(value, received, 2); //Explained below. Makes a binary char* from a int
             if (value==0){ //The received message is empty or RCSwitch gives an error
                 pc.printf("No reconocido");
+                led_tx = 1;
                 mySwitch.send(actual_message);
-                count = 0;
+                led_tx = 0;
+                dif_time = 0;
+                mySwitch.resetAvailable();
                 wait_for_ack();
+            } else if (value == 42){ //42 is 101010. Its sended by Receptor when TX send an ACK
+                dif_time = 0;
+                times_resend = 0;
+                mySwitch.resetAvailable();
+                pc.printf("ACK recibido \r\n");
                 return;
-            } else if (value == 42){
-                count = 0;
-                return;
-            } else if(*(received) == *(actual_message)){
-                pc.printf("El destinatario confirma recepcion. Enviando ACK y pasando a la siguiente rutina\n \r");
+            } else if(*(received) == *(actual_message)){ //If received is equals as sended, send ACK
+                pc.printf("El destinatario confirma recepcion sin errores. Enviando ACK y pasando a esperar el ACK de vuelta\n");
                 strcpy(actual_message, "101010");
+                wait_ms(800);
+                led_tx = 1;
                 mySwitch.send(actual_message); //101010 == ACK
-                count = 0;
+                led_tx = 0;
+                dif_time = 0;
+                mySwitch.resetAvailable();
                 wait_for_ack();
-                return;
             } else{
                 pc.printf("Recibido: %d de %d bits  \n \r", mySwitch.getReceivedValue(), mySwitch.getReceivedBitlength());
                 pc.printf("Algo ha salido mal. Probando a reenviar la secuencia... \n \r");
-                count = 0;
-                resend();
+                dif_time = 0;
+                times_resend++;
+                mySwitch.resetAvailable();
+                resend(); //If received is not equal as sended, resend the message
             }
             mySwitch.resetAvailable();
-            count = 0;
+            dif_time = 0;
             return;
-            }
-            wait_ms(1000);
-            count++;
+        }
+        time(&stop_ack);
+        dif_time = difftime(stop_ack, start_ack);
     }
     pc.printf("No se ha obtenido ninguna respuesta por parte del receptor. Emitiendo de nuevo...\n \r");
-    count  = 0;
+    times_resend++;
+    dif_time = 0;
+    if(times_resend >= 7){
+        pc.printf("No ha sido posible obtener respuesta del receptor. Se han realizado 6 intentos de envio");
+        times_resend = 0;
+        return;
+    }
     resend();
 }
 
@@ -237,11 +256,9 @@ void wait_for_ack(void){
 *                                                                                    *
 **************************************************************************************/
 void read_pressure (void){
-    int average = 0; 
-    pressure_reading_sensor1 = pressure_sensor1.read();
-    average = pressure_reading_sensor1 * RESOLUTION; //Cause the measure is between 0-1 if we want to use a int, we need multiply it by a scalator to have a higher value
-    itoa(average, pressure_bin, 2);
-    if( average < 9000){
+    int measure = pressureAmplifier.getGram(); //Cause max weight the sensor can measure is 10.000 grams its not necessary multiply by RESOLUTION 
+    itoa(measure, pressure_bin, 2);
+    if(measure < 6000){
         pressure_type = 0; //That variable (sensor_type) indicates the priority of the message to be formed. 0 is regular priority and 1 is high priority
     }else{
         pressure_type = 1;
@@ -257,29 +274,27 @@ void read_pressure (void){
 *                                                                                    *
 **************************************************************************************/
 void read_ultrasound (void){
-    Timer tmr;
-    Timer tmr2;
-    long duration, cm;
-    ultrasound_sensor1.output();
-    ultrasound_sensor1 = 0;
+    long duration;
+    int cm;
+    ultrasound_sensor.write(0); //Reset bus
     wait_us(2);
-    ultrasound_sensor1 = 1;
-    wait_us(5);
-    ultrasound_sensor1 = 0;
-    ultrasound_sensor1.input();
-    while (ultrasound_sensor1==0); // wait for high
-    tmr.reset(); 
-    tmr.start();
-    while (ultrasound_sensor1==1); // wait for low
-    duration = tmr.read_us();
+    ultrasound_sensor.write_us(1,5); //(Value, time). The time and the method to measure is the recommended by sensor manufacturer
+    duration = ultrasound_sensor.read_high_us(1000000); //int timeout in us. If one second elapsed, and didn't receive a pulse, return -1
+    if(duration == -1){
+        wait_ms(100);
+        read_ultrasound(); //If the measure is wrong, do it again
+    }
     cm = duration / 29 / 2;
-    //pc.printf("cm=%4d\n",  cm);
+    if(cm == 0){
+        wait_ms(100);
+        read_ultrasound();
+    }
     int read_ultrasound1 = cm * 10; //Here I dont use RESOLUTION cause max value of cm is 400, and this value * RESOLUTION can cause an overflow
     itoa(read_ultrasound1, ultrasound1_bin,2);
-    if((read_ultrasound1 < 50)){ //For the demo, 50 is 5 cm
-        ultrasound_type = 0;
-    }else{
+    if((read_ultrasound1 < 20)){ //For the demo, 20 is 2 cm
         ultrasound_type = 1;
+    }else{
+        ultrasound_type = 0;
     }
     ultrasound1_final_chain = formatting_ultrasound_message(ultrasound_type, ultrasound_id);
 }
