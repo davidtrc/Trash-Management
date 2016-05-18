@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <RCSwitch.h>
+#include <math.h> 
 #include "mbed.h"
 
 #define MEASURE_SIZE 26
@@ -29,12 +30,11 @@ char decoded_message[150];
 // 9600 bauds, 8-bit data, no parity
 //------------------------------------
 Serial pc(SERIAL_TX, SERIAL_RX); //PRE-DEFINED PINS, CAN BE USED WITHOUT ANY PROBLEM CAUSE DON'T USE AVAILABLE PCB I/O
- 
-char* itoa(int value, char* result, int base);
 void send_received(void);
 void check_received();
 void decode_received_message(void);
-
+int bin2dec(const char* binary);
+char* itoa(int value, char* result, int base);
 
 static time_t start, end; //with them, can count time waiting for ACK
 static int seconds_elapsed = 0;
@@ -63,10 +63,10 @@ int main(){
         pc.printf("Esperando para el ACK\n");
         time(&start);
         while(!mySwitch.available()){
-            time(&stop);
-            seconds_elapsed = difftime(start, stop);
+            time(&end);
+            seconds_elapsed = difftime(start, end);
             if(seconds_elapsed >=2){
-                pc.printf("No se ha recibido el ACK, se considera la secuencia recibida válida y se pasa a su decodificación\n");
+                pc.printf("No se ha recibido el ACK, se considera la secuencia recibida valida y se pasa a su decodificacion\n");
                 break;
             }
         }
@@ -135,6 +135,7 @@ void check_received(){
 *                                                                                     *
 **************************************************************************************/
 void decode_received_message(){
+    int lecture_dec;
     int i = 0;
     for (i = 0; i<4; i++){
         node_id[i] = received[i];
@@ -188,10 +189,24 @@ void decode_received_message(){
         pc.printf("%c", lecture[i]);
         
     }
-    strcat(decoded_message, lecture);
-    strcat(decoded_message, "\r \n");
     pc.printf("\r \n");
-    pc.printf("%s", decoded_message);
+    
+    lecture_dec =  bin2dec(lecture);
+    char lecture_char = lecture_dec;
+    //strcat(decoded_message, lecture_char);
+    //pc.printf("%s", decoded_message);
+    //pc.printf("lecturaenint: %d", lecture_dec); 
+}
+
+int bin2dec(const char* binary){
+    int len,dec=0,i,exp;
+
+    len = strlen(binary);
+    exp = len-1;
+
+    for(i=0;i<len;i++,exp--)
+        dec += binary[i]=='1'?pow((double)2,exp):0;
+    return dec;
 }
 
 /*************************************************************************************
